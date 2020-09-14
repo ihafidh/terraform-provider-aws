@@ -925,21 +925,23 @@ func TestAccAWSInstance_ipv6_supportAddressCountWithIpv4(t *testing.T) {
 func TestAccAWSInstance_multipleRegions(t *testing.T) {
 	var v ec2.Instance
 	resourceName := "aws_instance.test"
+	resourceName2 := "aws_instance.test2"
+	rName := fmt.Sprintf("tf-testacc-instance-%s", acctest.RandStringFromCharSet(12, acctest.CharSetAlphaNum))
 
 	// record the initialized providers so that we can use them to
 	// check for the instances in each region
 	var providers []*schema.Provider
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:          func() { testAccPreCheck(t); testAccPartitionPreCheck(t, "aws") },
+		PreCheck:          func() { testAccPreCheck(t); testAccMultipleRegionPreCheck(t, 2) },
 		ProviderFactories: testAccProviderFactories(&providers),
 		CheckDestroy:      testAccCheckWithProviders(testAccCheckInstanceDestroyWithProvider, &providers),
 		Steps: []resource.TestStep{
 			{
-				Config: testAccInstanceConfigMultipleRegions,
+				Config: testAccInstanceConfigMultipleRegions(rName),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckInstanceExistsWithProvider(resourceName, &v, testAccAwsRegionProviderFunc("us-west-2", &providers)),
-					testAccCheckInstanceExistsWithProvider("aws_instance.test2", &v, testAccAwsRegionProviderFunc("us-east-1", &providers)),
+					testAccCheckInstanceExistsWithProvider(resourceName, &v, testAccAwsRegionProviderFunc(testAccGetRegion(), &providers)),
+					testAccCheckInstanceExistsWithProvider(resourceName2, &v, testAccAwsRegionProviderFunc(testAccGetAlternateRegion(), &providers)),
 				),
 			},
 		},
@@ -1398,7 +1400,7 @@ func TestAccAWSInstance_rootBlockDeviceMismatch(t *testing.T) {
 	rName := acctest.RandomWithPrefix("tf-acc-test")
 
 	resource.ParallelTest(t, resource.TestCase{
-		PreCheck:     func() { testAccPreCheck(t); testAccRegionPreCheck(t, "us-west-2") },
+		PreCheck:     func() { testAccPreCheck(t); testAccRegionPreCheck(t, "us-west-2") }, //lintignore:AWSAT003
 		Providers:    testAccProviders,
 		CheckDestroy: testAccCheckInstanceDestroy,
 		Steps: []resource.TestStep{
@@ -3833,28 +3835,59 @@ resource "aws_instance" "test" {
 `, rName)
 }
 
-const testAccInstanceConfigMultipleRegions = `
-provider "awswest" {
-  region = "us-west-2"
+func testAccInstanceConfigMultipleRegions(rName string) string {
+	return composeConfig(
+		testAccMultipleRegionProviderConfig(2),
+		testAccAvailableEc2InstanceTypeForRegion("m3.medium", "t3.nano"),
+		testAccLatestAmazonLinuxHvmEbsAmiConfig(),
+		fmt.Sprintf(`
+data "aws_ami" "amzn-ami-minimal-hvm-ebs-alt" {
+  provider    = "awsalternate"
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn-ami-minimal-hvm-*"]
+  }
+
+  filter {
+    name   = "root-device-type"
+    values = ["ebs"]
+  }
 }
 
-provider "awseast" {
-  region = "us-east-1"
+data "aws_ec2_instance_type_offering" "alternate" {
+  provider = "awsalternate"
+
+  filter {
+    name   = "instance-type"
+    values = ["m3.medium", "t3.nano"]
+  }
+
+  preferred_instance_types = ["m3.medium", "t3.nano"]
 }
+
 resource "aws_instance" "test" {
-  # us-west-2
-  provider      = "awswest"
-  ami           = "ami-4fccb37f"
-  instance_type = "m1.small"
+  ami           = data.aws_ami.amzn-ami-minimal-hvm-ebs.id
+  instance_type = data.aws_ec2_instance_type_offering.available.instance_type
+
+  tags = {
+    Name = %[1]q
+  }
 }
 
 resource "aws_instance" "test2" {
-  # us-east-1
-  provider      = "awseast"
-  ami           = "ami-8c6ea9e4"
-  instance_type = "m1.small"
+  provider      = "awsalternate"
+  ami           = data.aws_ami.amzn-ami-minimal-hvm-ebs-alt.id
+  instance_type = data.aws_ec2_instance_type_offering.alternate.instance_type
+
+  tags = {
+    Name = %[1]q
+  }
 }
-`
+`, rName))
+}
 
 func testAccCheckInstanceConfigTags() string {
 	return composeConfig(testAccLatestAmazonLinuxHvmEbsAmiConfig(), fmt.Sprintf(`
@@ -4316,7 +4349,7 @@ resource "aws_instance" "test" {
     volume_size = 13
   }
 }
-`
+` //lintignore:AWSAT002
 }
 
 func testAccInstanceConfigForceNewAndTagsDrift(rName string) string {
